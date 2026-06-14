@@ -4,6 +4,7 @@ from PIL import Image
 import logging
 import requests
 import re
+import struct
 from py_mini_racer import MiniRacer
 import json
 import base64
@@ -47,6 +48,92 @@ def decode_search_value(value: str) -> str:
     else:
         # 没有URL编码特征，直接返回
         return value
+
+
+def is_truthy_arg(name: str) -> bool:
+    value = request.args.get(name, "0")
+    return value in ("1", "true", "True", "yes", "on")
+
+
+def normalize_rgb_image(image):
+    if image.mode in ("RGBA", "LA", "P"):
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        if image.mode in ("RGBA", "LA"):
+            background.paste(image, mask=image.split()[-1])
+        else:
+            background.paste(image)
+        return background
+    if image.mode != "RGB":
+        return image.convert("RGB")
+    return image
+
+
+def optimize_png_image(image, quality: int):
+    quality = max(1, min(100, quality))
+    image = normalize_rgb_image(image)
+    if quality >= 95:
+        return image
+    colors = max(16, min(256, int(16 + quality * 2.4)))
+    return image.quantize(colors=colors, method=Image.Quantize.MEDIANCUT)
+
+
+def convert_to_lvgl8(image):
+    image = normalize_rgb_image(image)
+    image = image.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+    w, h = image.size
+
+    raw_palette = image.getpalette()
+    palette = []
+    for i in range(256):
+        idx = i * 3
+        if idx + 2 < len(raw_palette):
+            palette.append((raw_palette[idx], raw_palette[idx + 1], raw_palette[idx + 2]))
+        else:
+            palette.append((0, 0, 0))
+
+    output = BytesIO()
+    output.write(struct.pack("<I", 10 | (w << 10) | (h << 21)))
+    for r, g, b in palette:
+        output.write(bytes([b, g, r, 0xFF]))
+    output.write(image.tobytes())
+    return output.getvalue()
+
+
+def build_image_response(image, filename_base: str, quality: int = 50):
+    if is_truthy_arg("ifLVGL"):
+        data = convert_to_lvgl8(image)
+        return Response(
+            data,
+            mimetype="application/octet-stream",
+            headers={
+                "Cache-Control": "public, max-age=86400",
+                "Content-Disposition": f'inline; filename="{filename_base}.bin"',
+                "Content-Type": "application/octet-stream",
+            },
+        )
+
+    output_buffer = BytesIO()
+    if is_truthy_arg("ifPNG"):
+        image = optimize_png_image(image, quality)
+        image.save(output_buffer, "PNG", optimize=True, compress_level=9)
+        mimetype = "image/png"
+        filename = f"{filename_base}.png"
+    else:
+        image = normalize_rgb_image(image)
+        image.save(output_buffer, "JPEG", quality=quality, optimize=True)
+        mimetype = "image/jpeg"
+        filename = f"{filename_base}.jpg"
+
+    output_buffer.seek(0)
+    return Response(
+        output_buffer.getvalue(),
+        mimetype=mimetype,
+        headers={
+            "Cache-Control": "public, max-age=86400",
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Content-Type": mimetype,
+        },
+    )
 
 
 # 配置
@@ -238,7 +325,7 @@ class ComicParser:
                 data = data_match[0]
 
                 # 提取nonce
-                nonce_matches = re.findall('window\[".+?(?<=;)', html)
+                nonce_matches = re.findall(r'window\[".+?(?<=;)', html)
                 if len(nonce_matches) < 2:
                     return {"error": "未找到nonce数据"}
 
@@ -248,13 +335,13 @@ class ComicParser:
 
                 # 解密数据
                 T = list(data)
-                N = re.findall("\d+[a-zA-Z]+", nonce)
+                N = re.findall(r"\d+[a-zA-Z]+", nonce)
                 jlen = len(N)
 
                 while jlen:
                     jlen -= 1
-                    jlocate = int(re.findall("\d+", N[jlen])[0]) & 255
-                    jstr = re.sub("\d+", "", N[jlen])
+                    jlocate = int(re.findall(r"\d+", N[jlen])[0]) & 255
+                    jstr = re.sub(r"\d+", "", N[jlen])
                     del T[jlocate : jlocate + len(jstr)]
 
                 T = "".join(T)
@@ -291,10 +378,8 @@ class ComicParser:
 # 同时，在获取章节图片数据的部分，修改图片URL为代理URL
 def get_proxy_image_url(original_url, number=0):
     """生成图片代理URL"""
-    from urllib.parse import quote
     api_url = request.host_url.rstrip("/")
-
-    proxy_url = f"{api_url}/image/proxy?url={quote(original_url)}&{number}"
+    proxy_url = f"{api_url}/image/proxy?url={quote(original_url, safe='')}&page={number}"
     return proxy_url
 
 
@@ -526,13 +611,20 @@ def get_comic_info(comic_id: str):
         if "error" in info:
             return jsonify(info), 500
         
+        cover_url = info.get("cover_url", "")
+        rate_value = info.get("rating", {}).get("score", "0")
+        try:
+            rate = float(rate_value)
+        except (TypeError, ValueError):
+            rate = 0
+
         result = {
             "item_id": int(comic_id),
             "name": info.get("title", ""),
             "page_count": 0,
             "views": info.get("popularity", "0"),
-            "rate": float(info.get("rating", {}).get("score", "0")),
-            "cover": info.get("cover_url", ""),
+            "rate": rate,
+            "cover": get_proxy_image_url(cover_url, "cover") if cover_url else "",
             "tags": info.get("tags", []),
             "total_chapters": info.get("total_chapters", 0)
         }
@@ -550,6 +642,9 @@ def get_specific_chapter(comic_id: str, chapter_number: int):
         else None
     )
     print(f"使用的Cookie: {cookie}")
+    if chapter_number < 1:
+        return jsonify({"error": "章节号必须从 1 开始"}), 400
+
     try:
         comic_info = ComicParser.get_comic_info(comic_id)
         if "error" in comic_info:
@@ -605,10 +700,11 @@ def search_comics(value: str = "", client_page: Optional[int] = 1):
 
         results = []
         for comic in search_result.get("results", []):
+            cover_url = comic.get("cover_url", "")
             results.append({
                 "comic_id": int(comic.get("comic_id", 0)),
                 "title": comic.get("title", ""),
-                "cover_url": comic.get("cover_url", ""),
+                "cover_url": get_proxy_image_url(cover_url, "cover") if cover_url else "",
                 "pages": 0
             })
 
@@ -625,17 +721,16 @@ def search_comics(value: str = "", client_page: Optional[int] = 1):
 # 在Flask路由部分添加图片代理接口
 @app.route("/image/proxy")
 def image_proxy():
-    """图片代理接口，处理图片尺寸和质量"""
+    """图片代理接口，处理图片尺寸、质量和格式"""
     try:
         image_url = request.args.get("url")
         if not image_url:
             return jsonify({"error": "缺少url参数"}), 400
 
-        # 设置目标宽度和图片质量
-        target_width = int(request.args.get("width", 600))
-        quality = int(request.args.get("quality", 50))
+        target_width = int(request.args.get("width") or request.args.get("w") or 600)
+        quality = int(request.args.get("quality") or request.args.get("q") or 50)
+        quality = max(1, min(100, quality))
 
-        # 下载原始图片
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             "Referer": "https://ac.qq.com/",
@@ -645,43 +740,12 @@ def image_proxy():
         if resp.status_code != 200:
             return jsonify({"error": f"图片下载失败: {resp.status_code}"}), 500
 
-        # 处理图片
-        original_image = Image.open(BytesIO(resp.content))
+        image = Image.open(BytesIO(resp.content))
+        if image.width > target_width:
+            target_height = int(image.height * (target_width / image.width))
+            image = image.resize((target_width, target_height), Image.Resampling.LANCZOS)
 
-        # 计算新高度，保持宽高比
-        width_percent = target_width / float(original_image.size[0])
-        target_height = int(float(original_image.size[1]) * float(width_percent))
-
-        # 调整图片尺寸
-        resized_image = original_image.resize(
-            (target_width, target_height), Image.Resampling.LANCZOS
-        )
-
-        # 保存为JPEG格式并调整质量
-        output_buffer = BytesIO()
-        if original_image.mode in ("RGBA", "LA", "P"):
-            # 如果图片有透明度，转换为RGB
-            background = Image.new("RGB", resized_image.size, (255, 255, 255))
-            background.paste(
-                resized_image,
-                mask=(
-                    resized_image.split()[-1] if resized_image.mode == "RGBA" else None
-                ),
-            )
-            resized_image = background
-
-        resized_image.save(output_buffer, format="JPEG", quality=quality, optimize=True)
-        output_buffer.seek(0)
-
-        # 返回处理后的图片
-        return Response(
-            output_buffer.getvalue(),
-            mimetype="image/jpeg",
-            headers={
-                "Cache-Control": "public, max-age=86400",  # 缓存1天
-                "Content-Disposition": "inline",
-            },
-        )
+        return build_image_response(image, "qqcomic_image", quality)
 
     except Exception as e:
         logging.error(f"图片处理失败: {str(e)}")

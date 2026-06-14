@@ -15,6 +15,7 @@
 - 🐍 **Python 驱动** - 使用 Flask 轻量级框架
 - 🎯 **自定义漫画源** - 完全符合自定义漫画源规范，支持设备互联
 - 🍪 **Cookie 支持** - 支持通过 Cookie 认证访问受限内容
+- 🖼️ **图片代理** - 支持按宽度缩放、质量压缩、PNG 输出和 LVGL 预解码二进制输出
 
 ## 🛠️ 技术栈
 
@@ -81,9 +82,9 @@ GET /config
 **响应示例**:
 ```json
 {
-  "qqcomic": {
-    "name": "qqcomic",
-    "apiUrl": "",
+  "QQComic": {
+    "name": "腾讯动漫",
+    "apiUrl": "https://your-app.vercel.app",
     "detailPath": "/comic/<id>",
     "photoPath": "/photo/<id>/chapter/<chapter>",
     "searchPath": "/search/<text>/<page>",
@@ -104,11 +105,11 @@ GET /comic/<comic_id>
 {
   "item_id": 114514,
   "name": "漫画名称",
-  "page_count": 24,
+  "page_count": 0,
   "views": "1919810",
   "rate": 9.0,
-  "cover": "https://cover.url",
-  "tags": ["tag1", "tag2"],
+  "cover": "https://your-app.vercel.app/image/proxy?url=...&page=cover",
+  "tags": [],
   "total_chapters": 10
 }
 ```
@@ -127,10 +128,10 @@ GET /photo/<comic_id>/chapter/<chapter_number>
 **响应示例**:
 ```json
 {
-  "title": "漫画名称",
+  "title": "章节名称",
   "images": [
-    {"url": "https://image1.url?width=600&quality=50"},
-    {"url": "https://image2.url?width=600&quality=50"}
+    {"url": "https://your-app.vercel.app/image/proxy?url=...&page=1"},
+    {"url": "https://your-app.vercel.app/image/proxy?url=...&page=2"}
   ]
 }
 ```
@@ -152,8 +153,8 @@ GET /search/<keyword>/<page>
     {
       "comic_id": 114514,
       "title": "漫画名称",
-      "cover_url": "https://cover.url",
-      "pages": 24
+      "cover_url": "https://your-app.vercel.app/image/proxy?url=...&page=cover",
+      "pages": 0
     }
   ]
 }
@@ -164,13 +165,26 @@ GET /search/<keyword>/<page>
 GET /image/proxy?url=<image_url>&width=<width>&quality=<quality>
 ```
 参数:
-- `url`: 原始图片URL (必须)
-- `width`: 目标宽度，默认 600
-- `quality`: 图片质量 (0-100)，默认 50
+- `url`: 原始图片 URL (必须)
+- `width` 或 `w`: 目标宽度，默认 600
+- `quality` 或 `q`: 图片质量 (1-100)，默认 50
+- `ifPNG`: 为 `1`、`true`、`True`、`yes`、`on` 时返回 PNG
+- `ifLVGL`: 为 `1`、`true`、`True`、`yes`、`on` 时返回 LVGL 预解码二进制
 
-用于根据设备性能调整图片尺寸和质量。
+输出优先级：
 
-## � Cookie 认证支持
+```text
+ifLVGL=1 > ifPNG=1 > 默认 JPEG
+```
+
+返回内容:
+- 默认返回 `Content-Type: image/jpeg`
+- 开启 `ifPNG` 返回 `Content-Type: image/png`
+- 开启 `ifLVGL` 返回 `Content-Type: application/octet-stream`
+
+腕上漫画会在请求封面和正文图片时自动追加 `width`、`quality`、`ifPNG`、`ifLVGL` 等参数，图片列表接口不需要提前拼好这些参数。
+
+## 🍪 Cookie 认证支持
 
 本项目支持通过 Cookie 认证访问 QQComic 的受限内容。
 
@@ -188,8 +202,8 @@ GET /image/proxy?url=<image_url>&width=<width>&quality=<quality>
 
 3. **设备互联功能**
    - 如果使用支持设备互联的客户端，可以通过客户端的 Cookie 上传功能配置
-   - Cookie 会以 JSON 格式存储，格式为 `{"sourceName": "cookie_value"}`
-   - `sourceName` 对应配置文件中的漫画源名称 (本项目为 `qqcomic`)
+   - Cookie 会以 JSON 格式存储，格式为 `{"QQComic": "cookie_value"}`
+   - `QQComic` 对应 `/config` 返回对象中的漫画源键名
 
 ### 注意事项
 
@@ -197,7 +211,7 @@ GET /image/proxy?url=<image_url>&width=<width>&quality=<quality>
 - 请妥善保管您的 Cookie，不要泄露给他人
 - Cookie 认证主要用于访问 VIP 或受限内容
 
-## � 作为自定义漫画源使用
+## 📱 作为自定义漫画源使用
 
 本项目完全符合自定义漫画源配置规范，可以直接作为自定义漫画源部署使用。
 
@@ -226,7 +240,7 @@ GET /image/proxy?url=<image_url>&width=<width>&quality=<quality>
 - ✅ Cookie 认证
 - ✅ 设备互联支持
 
-## ️ 项目结构
+## 🗂️ 项目结构
 
 ```
 vercel-flask-QQComic-api/
