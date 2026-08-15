@@ -8,6 +8,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "build": "echo \"no build step (cloud functions only)\"",
     "dev": "node local-server.js",
     "start": "node local-server.js"
   },
