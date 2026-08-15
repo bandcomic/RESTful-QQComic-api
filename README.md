@@ -1,6 +1,6 @@
 # 腾讯动漫 API - EdgeOne Pages
 
-基于 Node.js (Hono) 的腾讯动漫 RESTful API，部署在腾讯云 EdgeOne Pages。
+基于 Python (Flask) 的腾讯动漫 RESTful API，部署在腾讯云 EdgeOne Pages。
 
 ## 特性
 
@@ -15,26 +15,19 @@
 
 ```
 ├── cloud-functions/
-│   ├── index.js          # 入口（路由 /）
-│   ├── [[default]].js    # 入口（路由 /*）
-│   └── lib/              # 业务模块
-│       ├── app.js        # Hono 应用与路由
-│       ├── parser.js     # 详情/章节解析 + node:vm nonce 解密
-│       ├── search.js     # 搜索
-│       ├── image.js      # 图片管线（vendored jpeg-js + UPNG.js）
-│       ├── cache.js      # TTL 内存缓存
-│       ├── util.js       # 工具函数
-│       └── vendor/       # 内嵌依赖（jpeg-js / UPNG.js / pako，去除 Node 特有引用）
-├── local-server.js       # 本地开发服务器
-├── package.json
+│   ├── index.py          # Flask 入口（路由 /）
+│   └── [[default]].py    # Flask 入口（路由 /*），与 index.py 内容一致
+├── requirements.txt
 └── edgeone.json
 ```
+
+> 注意：`cloud-functions/` 下两个入口文件内容一致，修改代码时需保持两份同步。
 
 ## 本地开发
 
 ```bash
-npm install
-npm run dev        # http://localhost:8000
+pip install -r requirements.txt
+python cloud-functions/index.py        # http://localhost:8000
 ```
 
 ## EdgeOne Pages 部署
@@ -74,6 +67,12 @@ npm run dev        # http://localhost:8000
 ## Cookie
 
 免费章节无需登录；付费章节需购买后由请求方携带 Cookie 访问，服务端自动转发上游。带 Cookie 的请求不读写缓存。
+
+## 实现说明
+
+- **章节解密**：章节页的 `var DATA` 为插入干扰字符的 base64，干扰位置由页面 `window["nonce"]` 混淆 JS 决定。混淆表达式属固定模板家族（字符串拼接、数字四则/位运算、`!`/`~~` 链、`window`/`document` 取真值、三元、`parseInt`/`Math.*`、`substring`/`charCodeAt`），本服务用零依赖的微型求值器求值，逐个候选实际试解密验证，免疫页面中的诱饵 nonce 与模板轮换。
+- **章节顺序**：详情页章节先去重，再按首尾 cid 自动识别正倒序并纠正，最后统一重新编号，客户端按 `chapter=1..N` 正序访问。
+- **缓存**：详情 10 分钟、章节数据 30 分钟（模块级内存缓存，暖实例间共享）。
 
 ## 免责声明
 
