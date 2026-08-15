@@ -48,7 +48,7 @@ function proxyImageUrl(apiUrl, originalUrl, page) {
 
 app.get('/', (c) => c.text('it works!'))
 
-// 漫画源配置（腕上漫画同步器请求此接口识别漫画源）
+// 漫画源配置
 app.get('/config', (c) => {
   const apiUrl = getApiUrl(c)
   return c.json({
