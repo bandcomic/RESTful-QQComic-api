@@ -15,6 +15,7 @@ from urllib.parse import quote
 import requests
 from flask import Flask, Response, jsonify, request
 from PIL import Image
+from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__)
 app.debug = False
@@ -65,6 +66,13 @@ def handle_api_error(e):
     if e.status >= 500:
         logging.warning(f"上游错误 {e.status}: {e.message}")
     return jsonify({"code": e.status, "message": e.message}), e.status
+
+
+@app.errorhandler(HTTPException)
+def handle_http_error(e):
+    """Flask/Werkzeug 自身的 HTTP 错误（如路由未命中 404、方法不允许 405），
+    统一按约定 JSON 格式返回"""
+    return jsonify({"code": e.code, "message": e.name}), e.code
 
 
 @app.errorhandler(Exception)
