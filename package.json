@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "hono": "4.13.2",
-    "jimp": "1.6.1",
+    "jpeg-js": "0.4.4",
     "upng-js": "2.1.0"
   },
   "devDependencies": {

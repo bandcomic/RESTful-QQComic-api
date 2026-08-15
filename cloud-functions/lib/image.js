@@ -1,6 +1,6 @@
 // 图片处理管线：下载 → 缩放 → JPEG / PNG 量化 / LVGL 预解码
-// 纯 JS 实现（jimp + UPNG.js），无原生/WASM 依赖，兼容任何 serverless 打包环境
-import { Jimp, JimpMime } from 'jimp'
+// 纯 JS 实现（jpeg-js + UPNG.js + 手写双线性缩放），依赖极少，兼容任何 serverless 打包环境
+import jpeg from 'jpeg-js'
 import UPNG from 'upng-js'
 import { HttpError } from './util.js'
 
@@ -35,58 +35,22 @@ export async function fetchImageBuffer(imageUrl) {
   return buf
 }
 
-/**
- * 处理图片：等比缩放（仅缩小）后按参数输出 JPEG / PNG / LVGL 二进制。
- * 返回 { data: Buffer, contentType: string }
- */
-export async function processImage(input, { width, quality, ifPNG, ifLVGL }) {
-  let image
+/** 按 magic bytes 解码为 RGBA 位图 { data: Buffer, width, height } */
+function decodeImage(buf) {
   try {
-    image = await Jimp.read(input)
+    if (buf[0] === 0xff && buf[1] === 0xd8) {
+      const raw = jpeg.decode(buf, { maxMemoryUsageInMB: 512 })
+      return { data: raw.data, width: raw.width, height: raw.height }
+    }
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+      const png = UPNG.decode(buf)
+      const rgba = UPNG.toRGBA8(png)[0]
+      return { data: Buffer.from(rgba), width: png.width, height: png.height }
+    }
   } catch {
-    throw new HttpError(502, '图片解码失败')
+    // fallthrough
   }
-
-  if (image.bitmap.width * image.bitmap.height > MAX_PIXELS) {
-    throw new HttpError(413, '图片尺寸过大')
-  }
-
-  // 透明通道铺白底（原地混合，alpha 置不透明）
-  flattenAlpha(image.bitmap.data)
-
-  if (ifLVGL) {
-    // LVGL 头部宽高仅 11 bit（≤2047），需保证缩放后高度也不超限
-    const origW = image.bitmap.width
-    const origH = image.bitmap.height
-    let w = Math.min(width, origW)
-    let h = Math.round(origH * (w / origW))
-    if (h > LVGL_MAX_DIM) {
-      h = LVGL_MAX_DIM
-      w = Math.max(1, Math.floor(origW * (h / origH)))
-    }
-    image.resize({ w, h })
-    return {
-      data: packLvgl8(image.bitmap.data, image.bitmap.width, image.bitmap.height),
-      contentType: 'application/octet-stream',
-    }
-  }
-
-  if (image.bitmap.width > width) {
-    image.resize({ w: width })
-  }
-
-  if (ifPNG) {
-    const colors = Math.max(16, Math.min(256, Math.trunc(16 + quality * 2.4)))
-    const { data, width: w, height: h } = image.bitmap
-    const rgba = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
-    return {
-      data: Buffer.from(UPNG.encode([rgba], w, h, colors)),
-      contentType: 'image/png',
-    }
-  }
-
-  const data = await image.getBuffer(JimpMime.jpeg, { quality })
-  return { data, contentType: 'image/jpeg' }
+  throw new HttpError(502, '图片解码失败（仅支持 JPEG/PNG）')
 }
 
 /** RGBA 原位 alpha 混合到白底 */
@@ -101,6 +65,89 @@ function flattenAlpha(data) {
       data[i + 3] = 255
     }
   }
+}
+
+/** RGBA 双线性缩放（仅用于缩小），返回新 Buffer */
+function resizeBilinear(src, sw, sh, dw, dh) {
+  const dst = Buffer.alloc(dw * dh * 4)
+  const xRatio = sw / dw
+  const yRatio = sh / dh
+  for (let y = 0; y < dh; y++) {
+    const fy = (y + 0.5) * yRatio - 0.5
+    const y0 = Math.max(0, Math.floor(fy))
+    const y1 = Math.min(sh - 1, y0 + 1)
+    const wy = fy - y0
+    for (let x = 0; x < dw; x++) {
+      const fx = (x + 0.5) * xRatio - 0.5
+      const x0 = Math.max(0, Math.floor(fx))
+      const x1 = Math.min(sw - 1, x0 + 1)
+      const wx = fx - x0
+      const i00 = (y0 * sw + x0) * 4
+      const i01 = (y0 * sw + x1) * 4
+      const i10 = (y1 * sw + x0) * 4
+      const i11 = (y1 * sw + x1) * 4
+      const di = (y * dw + x) * 4
+      for (let c = 0; c < 4; c++) {
+        const top = src[i00 + c] * (1 - wx) + src[i01 + c] * wx
+        const bottom = src[i10 + c] * (1 - wx) + src[i11 + c] * wx
+        dst[di + c] = top * (1 - wy) + bottom * wy
+      }
+    }
+  }
+  return dst
+}
+
+/**
+ * 处理图片：等比缩放（仅缩小）后按参数输出 JPEG / PNG / LVGL 二进制。
+ * 返回 { data: Buffer, contentType: string }
+ */
+export async function processImage(input, { width, quality, ifPNG, ifLVGL }) {
+  const image = decodeImage(input)
+  if (image.width * image.height > MAX_PIXELS) {
+    throw new HttpError(413, '图片尺寸过大')
+  }
+
+  // 透明通道铺白底
+  flattenAlpha(image.data)
+
+  let w = image.width
+  let h = image.height
+  let pixels = image.data
+
+  if (ifLVGL) {
+    // LVGL 头部宽高仅 11 bit（≤2047），需保证缩放后高度也不超限
+    let tw = Math.min(width, w)
+    let th = Math.round(h * (tw / w))
+    if (th > LVGL_MAX_DIM) {
+      th = LVGL_MAX_DIM
+      tw = Math.max(1, Math.floor(w * (th / h)))
+    }
+    if (tw !== w) {
+      pixels = resizeBilinear(pixels, w, h, tw, th)
+      w = tw
+      h = th
+    }
+    return { data: packLvgl8(pixels, w, h), contentType: 'application/octet-stream' }
+  }
+
+  if (w > width) {
+    const th = Math.round(h * (width / w))
+    pixels = resizeBilinear(pixels, w, h, width, th)
+    w = width
+    h = th
+  }
+
+  if (ifPNG) {
+    const colors = Math.max(16, Math.min(256, Math.trunc(16 + quality * 2.4)))
+    const rgba = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength)
+    return {
+      data: Buffer.from(UPNG.encode([rgba], w, h, colors)),
+      contentType: 'image/png',
+    }
+  }
+
+  const encoded = jpeg.encode({ data: pixels, width: w, height: h }, quality)
+  return { data: encoded.data, contentType: 'image/jpeg' }
 }
 
 // ---------------------------------------------------------------------------
