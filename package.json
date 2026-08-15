@@ -1,7 +1,7 @@
 {
   "name": "edgeone-qqcomic-api",
   "version": "2.0.0",
-  "description": "腾讯动漫 RESTful API（腕上漫画自定义漫画源），部署于 EdgeOne Pages Cloud Functions (Node.js)",
+  "description": "腾讯动漫 RESTful API，部署于 EdgeOne Pages Cloud Functions (Node.js)",
   "private": true,
   "type": "module",
   "engines": {
@@ -13,9 +13,7 @@
     "start": "node local-server.js"
   },
   "dependencies": {
-    "hono": "4.13.2",
-    "jpeg-js": "0.4.4",
-    "upng-js": "2.1.0"
+    "hono": "4.13.2"
   },
   "devDependencies": {
     "@hono/node-server": "2.1.1"

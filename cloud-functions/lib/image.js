@@ -1,7 +1,9 @@
 // 图片处理管线：下载 → 缩放 → JPEG / PNG 量化 / LVGL 预解码
-// 纯 JS 实现（jpeg-js + UPNG.js + 手写双线性缩放），依赖极少，兼容任何 serverless 打包环境
-import jpeg from 'jpeg-js'
-import UPNG from 'upng-js'
+// 纯 JS 实现（vendored jpeg-js + UPNG.js + 手写双线性缩放），
+// 全链路零 node: 内置模块 / Buffer / process 引用，兼容 EdgeOne 打包器
+import jpegDecode from './vendor/jpeg-decoder.js'
+import jpegEncode from './vendor/jpeg-encoder.js'
+import UPNG from './vendor/upng.js'
 import { HttpError } from './util.js'
 
 const IMAGE_HEADERS = {
@@ -30,22 +32,23 @@ export async function fetchImageBuffer(imageUrl) {
   }
   const declared = Number(resp.headers.get('content-length') || 0)
   if (declared > MAX_DOWNLOAD_BYTES) throw new HttpError(413, '图片体积过大')
-  const buf = Buffer.from(await resp.arrayBuffer())
+  const buf = new Uint8Array(await resp.arrayBuffer())
   if (buf.length > MAX_DOWNLOAD_BYTES) throw new HttpError(413, '图片体积过大')
   return buf
 }
 
-/** 按 magic bytes 解码为 RGBA 位图 { data: Buffer, width, height } */
+/** 按 magic bytes 解码为 RGBA 位图 { data: Uint8Array, width, height } */
 function decodeImage(buf) {
   try {
     if (buf[0] === 0xff && buf[1] === 0xd8) {
-      const raw = jpeg.decode(buf, { maxMemoryUsageInMB: 512 })
+      const raw = jpegDecode(buf, { maxMemoryUsageInMB: 512 })
       return { data: raw.data, width: raw.width, height: raw.height }
     }
     if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
-      const png = UPNG.decode(buf)
+      const rgbaBuf = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+      const png = UPNG.decode(rgbaBuf)
       const rgba = UPNG.toRGBA8(png)[0]
-      return { data: Buffer.from(rgba), width: png.width, height: png.height }
+      return { data: new Uint8Array(rgba), width: png.width, height: png.height }
     }
   } catch {
     // fallthrough
@@ -67,9 +70,9 @@ function flattenAlpha(data) {
   }
 }
 
-/** RGBA 双线性缩放（仅用于缩小），返回新 Buffer */
+/** RGBA 双线性缩放（仅用于缩小），返回新 Uint8Array */
 function resizeBilinear(src, sw, sh, dw, dh) {
-  const dst = Buffer.alloc(dw * dh * 4)
+  const dst = new Uint8Array(dw * dh * 4)
   const xRatio = sw / dw
   const yRatio = sh / dh
   for (let y = 0; y < dh; y++) {
@@ -141,12 +144,12 @@ export async function processImage(input, { width, quality, ifPNG, ifLVGL }) {
     const colors = Math.max(16, Math.min(256, Math.trunc(16 + quality * 2.4)))
     const rgba = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength)
     return {
-      data: Buffer.from(UPNG.encode([rgba], w, h, colors)),
+      data: new Uint8Array(UPNG.encode([rgba], w, h, colors)),
       contentType: 'image/png',
     }
   }
 
-  const encoded = jpeg.encode({ data: pixels, width: w, height: h }, quality)
+  const encoded = jpegEncode({ data: pixels, width: w, height: h }, quality)
   return { data: encoded.data, contentType: 'image/jpeg' }
 }
 
@@ -158,8 +161,12 @@ export async function processImage(input, { width, quality, ifPNG, ifLVGL }) {
 function packLvgl8(rgbaPixels, width, height) {
   const { palette, indices } = quantizeMedianCut(rgbaPixels, width * height)
 
-  const out = Buffer.alloc(4 + 256 * 4 + width * height)
-  out.writeUInt32LE((10 | (width << 10) | (height << 21)) >>> 0, 0)
+  const out = new Uint8Array(4 + 256 * 4 + width * height)
+  const header = (10 | (width << 10) | (height << 21)) >>> 0
+  out[0] = header & 0xff
+  out[1] = (header >> 8) & 0xff
+  out[2] = (header >> 16) & 0xff
+  out[3] = (header >> 24) & 0xff
 
   let offset = 4
   for (let i = 0; i < 256; i++) {
@@ -169,7 +176,7 @@ function packLvgl8(rgbaPixels, width, height) {
     out[offset++] = r
     out[offset++] = 0xff
   }
-  Buffer.from(indices).copy(out, offset)
+  out.set(indices, offset)
   return out
 }
 

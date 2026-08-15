@@ -14,9 +14,8 @@ export class HttpError extends Error {
  * 优先级：PUBLIC_URL 环境变量 > Eo-Pages-Host > X-Forwarded-* > 请求 URL。
  */
 export function getApiUrl(c) {
-  const envUrl =
-    c.env?.PUBLIC_URL ||
-    (typeof process !== 'undefined' ? process.env?.PUBLIC_URL : undefined)
+  // 不得引用 process/Buffer 等 Node 全局——EdgeOne 打包器会因此注入 polyfill 导致运行时错误
+  const envUrl = c.env?.PUBLIC_URL
   if (envUrl) return envUrl.replace(/\/+$/, '')
 
   const eoHost = c.req.header('eo-pages-host')?.trim()

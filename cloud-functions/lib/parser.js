@@ -1,5 +1,6 @@
 // 腾讯动漫详情页 / 章节页解析
-import vm from 'node:vm'
+// 注意：不得导入任何 node: 内置模块——EdgeOne 打包器会对 node: 导入注入 polyfill，
+// 会导致 vm 沙箱失效并产生运行时错误（stdin_default is not defined）
 import { HttpError } from './util.js'
 
 const DESKTOP_HEADERS = {
@@ -116,10 +117,20 @@ export async function getComicInfo(comicId, cookie) {
   }
 }
 
-/** 在带浏览器桩的沙箱中执行页面混淆 JS，求出 nonce 字符串 */
+/** 在受控作用域内执行页面混淆 JS，求出 nonce 字符串。
+ *  页面表达式仅为字符串拼接与算术（如 "f4" + (+eval("1 - !!document.children")).toString() + ...），
+ *  用 new Function 注入 document 桩即可求值；黑名单校验防注入。 */
 function evalNonceExpr(expr) {
-  const sandbox = { document: { children: [1] } }
-  const result = vm.runInNewContext(expr, sandbox, { timeout: 1000 })
+  if (expr.length > 2000) throw new Error('nonce 表达式过长')
+  if (
+    /\b(require|import|export|process|global|globalThis|Function|constructor|__proto__|prototype|while|for|new|this|fetch|Promise)\b/.test(
+      expr
+    )
+  ) {
+    throw new Error('nonce 表达式包含非法内容')
+  }
+  const fn = new Function('document', `"use strict"; return (${expr});`)
+  const result = fn({ children: [1] })
   return typeof result === 'string' ? result : String(result)
 }
 
@@ -132,7 +143,13 @@ function decodeChapterData(data, nonce) {
     const str = segments[i].replace(/\d+/g, '')
     chars.splice(locate, str.length)
   }
-  const decoded = Buffer.from(chars.join(''), 'base64').toString('utf-8')
+  // base64 → UTF-8 JSON（atob 需补齐 padding）
+  let b64 = chars.join('')
+  const rem = b64.length % 4
+  if (rem) b64 += '='.repeat(4 - rem)
+  const bin = atob(b64)
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0))
+  const decoded = new TextDecoder('utf-8').decode(bytes)
   const json = JSON.parse(decoded)
   if (!Array.isArray(json.picture)) throw new Error('解密结果缺少 picture 数组')
   return json

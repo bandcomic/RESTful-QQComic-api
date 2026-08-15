@@ -21,9 +21,10 @@
 │       ├── app.js        # Hono 应用与路由
 │       ├── parser.js     # 详情/章节解析 + node:vm nonce 解密
 │       ├── search.js     # 搜索
-│       ├── image.js      # 图片管线（jpeg-js + UPNG.js）
+│       ├── image.js      # 图片管线（vendored jpeg-js + UPNG.js）
 │       ├── cache.js      # TTL 内存缓存
-│       └── util.js       # 工具函数
+│       ├── util.js       # 工具函数
+│       └── vendor/       # 内嵌依赖（jpeg-js / UPNG.js / pako，去除 Node 特有引用）
 ├── local-server.js       # 本地开发服务器
 ├── package.json
 └── edgeone.json
