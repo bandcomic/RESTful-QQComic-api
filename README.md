@@ -9,7 +9,7 @@
 - 章节图片：章节加密数据（DATA + nonce）自动解密
 - 图片处理：缩放 / JPEG 质量 / PNG 量化 / LVGL 预解码
 - Cookie 支持：转发请求方 Cookie，支持已购付费章节
-- 图片代理域名白名单，防 SSRF 滥用
+- 图片由 API 直出（无开放代理），防 SSRF 滥用
 
 ## 项目结构
 
@@ -46,17 +46,18 @@ python cloud-functions/index.py        # http://localhost:8000
 | `GET /config` | 漫画源配置 |
 | `GET /search/<keyword>/<page>` | 搜索漫画，`page` 从 1 开始 |
 | `GET /comic/<comic_id>` | 漫画详情 |
+| `GET /comic/<comic_id>/cover` | 漫画封面 |
 | `GET /photo/<comic_id>/chapter/<chapter>` | 章节图片列表，`chapter` 从 1 开始（正序） |
-| `GET /image/proxy?url=<图片地址>` | 图片代理（白名单域名） |
+| `GET /photo/<comic_id>/chapter/<chapter>/<page>.jpg` | 单页图片，`page` 从 1 开始 |
 
-### 图片参数
+### 图片参数（封面 / 单页图片通用）
 
 | 参数 | 说明 |
 | --- | --- |
-| `width` | 目标宽度（仅缩小），1-2047，默认 600 |
+| `width` | 目标宽度（仅缩小），封面默认 200，正文默认 600 |
 | `quality` | JPEG 质量 / PNG 量化，1-100，默认 50 |
 | `ifPNG` | 为 `1` 时返回 PNG |
-| `ifLVGL` | 为 `1` 时返回 LVGL 预解码二进制（优先级高于 ifPNG） |
+| `ifLVGL` | 为 `1` 时返回 LVGL 预解码二进制（仅正文图片，优先级高于 ifPNG） |
 
 ### 错误返回
 

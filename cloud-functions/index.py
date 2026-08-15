@@ -10,7 +10,7 @@ import struct
 import time
 from io import BytesIO
 from threading import Lock
-from urllib.parse import quote
+from urllib.parse import urlencode, urlparse
 
 import requests
 from flask import Flask, Response, jsonify, request
@@ -119,8 +119,6 @@ ALLOWED_IMAGE_HOSTS = ("ac.qq.com", "acimg.cn", "qpic.cn", "gtimg.cn")
 
 
 def is_allowed_image_url(url):
-    from urllib.parse import urlparse
-
     try:
         u = urlparse(url)
     except Exception:
@@ -556,8 +554,6 @@ SEARCH_PAGE_SIZE = 10
 
 
 def search_comics(keyword, page):
-    from urllib.parse import urlencode
-
     params = urlencode(
         {"_t": int(time.time() * 1000), "word": keyword, "page": page, "pageSize": SEARCH_PAGE_SIZE, "style": "items"}
     )
@@ -600,6 +596,9 @@ IMAGE_HEADERS = {
 
 
 def fetch_image(image_url, retries=1):
+    """下载上游图片。地址来自上游页面/加密数据，仍做白名单校验做纵深防御。"""
+    if not is_allowed_image_url(image_url):
+        raise ApiError(502, "上游图片地址非法")
     last_exc = None
     for _ in range(retries + 1):
         try:
@@ -691,8 +690,19 @@ def process_image(image, width, quality, if_png, if_lvgl):
 # ---------------------------------------------------------------------------
 
 
-def proxy_image_url(api_url, original_url, page):
-    return f"{api_url}/image/proxy?url={quote(original_url, safe='')}&page={page}"
+def image_response(data, content_type):
+    return Response(
+        data,
+        mimetype=content_type,
+        headers={"Cache-Control": "public, max-age=86400", "Content-Type": content_type},
+    )
+
+
+def page_image_params(default_width):
+    """解析图片参数：width/quality/ifPNG/ifLVGL"""
+    width = clamp_int(request.args.get("width") or request.args.get("w"), default_width, 1, 2047, "width")
+    quality = clamp_int(request.args.get("quality") or request.args.get("q"), 50, 1, 100, "quality")
+    return width, quality, is_truthy_arg("ifPNG"), is_truthy_arg("ifLVGL")
 
 
 def get_comic_info_cached(comic_id, cookie):
@@ -752,23 +762,32 @@ def comic_info(comic_id):
             "page_count": 0,
             "views": info["popularity"],
             "rate": rate,
-            "cover": proxy_image_url(api_url, info["cover_url"], "cover") if info["cover_url"] else "",
+            "cover": f"{api_url}/comic/{comic_id}/cover",
             "tags": [],
             "total_chapters": info["total_chapters"],
         }
     )
 
 
-@app.get("/photo/<comic_id>/chapter/<int:chapter_number>")
-def chapter_images(comic_id, chapter_number):
+@app.get("/comic/<comic_id>/cover")
+def comic_cover(comic_id):
+    """漫画封面图片，支持 width/quality/ifPNG 参数"""
     if not comic_id.isdigit():
         raise ApiError(400, "无效的漫画ID")
-    if chapter_number < 1:
-        raise ApiError(400, "章节号必须从 1 开始")
-
     cookie = request.headers.get("Cookie") or None
     info = get_comic_info_cached(comic_id, cookie)
+    if not info["cover_url"]:
+        raise ApiError(404, "No cover found")
 
+    width, quality, if_png, _ = page_image_params(200)
+    image = fetch_image(info["cover_url"])
+    data, content_type = process_image(image, width, quality, if_png=if_png, if_lvgl=False)
+    return image_response(data, content_type)
+
+
+def resolve_chapter_pictures(comic_id, chapter_number, cookie):
+    """解析章节图片地址列表（含缓存），返回 (target_title, chapter_data)"""
+    info = get_comic_info_cached(comic_id, cookie)
     # 章节列表已按正序重新编号 1..N，直接按下标取
     if chapter_number > len(info["chapters"]):
         raise ApiError(404, f"未找到第 {chapter_number} 章")
@@ -779,16 +798,53 @@ def chapter_images(comic_id, chapter_number):
         data = get_chapter_images(target["link"], cookie)
         if not cookie:
             chapter_cache.set(target["link"], data)
+    return target, data
 
-    api_url = get_api_url()
+
+@app.get("/photo/<comic_id>/chapter/<int:chapter_number>")
+def chapter_images(comic_id, chapter_number):
+    if not comic_id.isdigit():
+        raise ApiError(400, "无效的漫画ID")
+    if chapter_number < 1:
+        raise ApiError(400, "章节号必须从 1 开始")
+
+    cookie = request.headers.get("Cookie") or None
+    target, data = resolve_chapter_pictures(comic_id, chapter_number, cookie)
+
     pictures = data["chapter_data"].get("picture") or []
+    page_count = len([p for p in pictures if p.get("url")])
+    api_url = get_api_url()
     images = [
-        {"url": proxy_image_url(api_url, pic["url"], i + 1)}
-        for i, pic in enumerate(pictures)
-        if pic.get("url")
+        {"url": f"{api_url}/photo/{comic_id}/chapter/{chapter_number}/{page}.jpg"}
+        for page in range(1, page_count + 1)
     ]
 
     return jsonify({"title": data["chapter_title"] or target["title"], "images": images})
+
+
+@app.get("/photo/<comic_id>/chapter/<int:chapter_number>/<path:page>")
+def chapter_page_image(comic_id, chapter_number, page):
+    """章节单页图片，格式 /photo/<id>/chapter/<chapter>/<page>.jpg"""
+    if not comic_id.isdigit():
+        raise ApiError(400, "无效的漫画ID")
+    if chapter_number < 1:
+        raise ApiError(400, "章节号必须从 1 开始")
+    m = re.match(r"^(\d+)", page or "")
+    if not m:
+        raise ApiError(400, "无效的页码")
+    page_num = int(m.group(1))
+
+    cookie = request.headers.get("Cookie") or None
+    _, data = resolve_chapter_pictures(comic_id, chapter_number, cookie)
+
+    pictures = [p["url"] for p in data["chapter_data"].get("picture") or [] if p.get("url")]
+    if page_num < 1 or page_num > len(pictures):
+        raise ApiError(404, "Page not found")
+
+    width, quality, if_png, if_lvgl = page_image_params(600)
+    image = fetch_image(pictures[page_num - 1])
+    img_data, content_type = process_image(image, width, quality, if_png=if_png, if_lvgl=if_lvgl)
+    return image_response(img_data, content_type)
 
 
 @app.get("/search/<value>")
@@ -813,38 +869,12 @@ def search(value, page="1"):
                 {
                     "comic_id": int(r["comic_id"]),
                     "title": r["title"],
-                    "cover_url": proxy_image_url(api_url, r["cover_url"], "cover") if r["cover_url"] else "",
+                    "cover_url": f"{api_url}/comic/{r['comic_id']}/cover",
                     "pages": 0,
                 }
                 for r in result["results"]
             ],
         }
-    )
-
-
-@app.get("/image/proxy")
-def image_proxy():
-    image_url = request.args.get("url")
-    if not image_url:
-        raise ApiError(400, "缺少url参数")
-    if not is_allowed_image_url(image_url):
-        raise ApiError(403, "不允许的图片地址")
-
-    width = clamp_int(request.args.get("width") or request.args.get("w"), 600, 1, 2047, "width")
-    quality = clamp_int(request.args.get("quality") or request.args.get("q"), 50, 1, 100, "quality")
-
-    image = fetch_image(image_url)
-    data, content_type = process_image(
-        image,
-        width,
-        quality,
-        if_png=is_truthy_arg("ifPNG"),
-        if_lvgl=is_truthy_arg("ifLVGL"),
-    )
-    return Response(
-        data,
-        mimetype=content_type,
-        headers={"Cache-Control": "public, max-age=86400", "Content-Type": content_type},
     )
 
 
