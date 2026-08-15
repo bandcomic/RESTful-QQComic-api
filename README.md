@@ -21,7 +21,7 @@
 │       ├── app.js        # Hono 应用与路由
 │       ├── parser.js     # 详情/章节解析 + node:vm nonce 解密
 │       ├── search.js     # 搜索
-│       ├── image.js      # 图片管线（sharp）
+│       ├── image.js      # 图片管线（jimp + UPNG.js）
 │       ├── cache.js      # TTL 内存缓存
 │       └── util.js       # 工具函数
 ├── local-server.js       # 本地开发服务器

@@ -1,5 +1,7 @@
 // 图片处理管线：下载 → 缩放 → JPEG / PNG 量化 / LVGL 预解码
-import sharp from 'sharp'
+// 纯 JS 实现（jimp + UPNG.js），无原生/WASM 依赖，兼容任何 serverless 打包环境
+import { Jimp, JimpMime } from 'jimp'
+import UPNG from 'upng-js'
 import { HttpError } from './util.js'
 
 const IMAGE_HEADERS = {
@@ -38,42 +40,67 @@ export async function fetchImageBuffer(imageUrl) {
  * 返回 { data: Buffer, contentType: string }
  */
 export async function processImage(input, { width, quality, ifPNG, ifLVGL }) {
-  const base = sharp(input, { limitInputPixels: MAX_PIXELS }).flatten({
-    background: { r: 255, g: 255, b: 255 },
-  })
-  const meta = await base.metadata()
-  const origWidth = meta.width || width
+  let image
+  try {
+    image = await Jimp.read(input)
+  } catch {
+    throw new HttpError(502, '图片解码失败')
+  }
+
+  if (image.bitmap.width * image.bitmap.height > MAX_PIXELS) {
+    throw new HttpError(413, '图片尺寸过大')
+  }
+
+  // 透明通道铺白底（原地混合，alpha 置不透明）
+  flattenAlpha(image.bitmap.data)
 
   if (ifLVGL) {
     // LVGL 头部宽高仅 11 bit（≤2047），需保证缩放后高度也不超限
-    let w = Math.min(width, origWidth)
-    let h = Math.round((meta.height || w) * (w / origWidth))
+    const origW = image.bitmap.width
+    const origH = image.bitmap.height
+    let w = Math.min(width, origW)
+    let h = Math.round(origH * (w / origW))
     if (h > LVGL_MAX_DIM) {
       h = LVGL_MAX_DIM
-      w = Math.max(1, Math.floor(origWidth * (h / (meta.height || h))))
+      w = Math.max(1, Math.floor(origW * (h / origH)))
     }
-    const { data, info } = await base
-      .resize({ width: w, height: h, fit: 'fill' })
-      .raw()
-      .toBuffer({ resolveWithObject: true })
-    return { data: packLvgl8(data, info.width, info.height), contentType: 'application/octet-stream' }
+    image.resize({ w, h })
+    return {
+      data: packLvgl8(image.bitmap.data, image.bitmap.width, image.bitmap.height),
+      contentType: 'application/octet-stream',
+    }
   }
 
-  let pipeline = base
-  if (origWidth > width) {
-    pipeline = pipeline.resize({ width, withoutEnlargement: true })
+  if (image.bitmap.width > width) {
+    image.resize({ w: width })
   }
 
   if (ifPNG) {
     const colors = Math.max(16, Math.min(256, Math.trunc(16 + quality * 2.4)))
-    const data = await pipeline
-      .png({ palette: true, colors, quality, compressionLevel: 9 })
-      .toBuffer()
-    return { data, contentType: 'image/png' }
+    const { data, width: w, height: h } = image.bitmap
+    const rgba = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+    return {
+      data: Buffer.from(UPNG.encode([rgba], w, h, colors)),
+      contentType: 'image/png',
+    }
   }
 
-  const data = await pipeline.jpeg({ quality, mozjpeg: true }).toBuffer()
+  const data = await image.getBuffer(JimpMime.jpeg, { quality })
   return { data, contentType: 'image/jpeg' }
+}
+
+/** RGBA 原位 alpha 混合到白底 */
+function flattenAlpha(data) {
+  for (let i = 0; i < data.length; i += 4) {
+    const a = data[i + 3]
+    if (a !== 255) {
+      const inv = 255 - a
+      data[i] = (data[i] * a + 255 * inv) / 255
+      data[i + 1] = (data[i + 1] * a + 255 * inv) / 255
+      data[i + 2] = (data[i + 2] * a + 255 * inv) / 255
+      data[i + 3] = 255
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -81,8 +108,8 @@ export async function processImage(input, { width, quality, ifPNG, ifLVGL }) {
 // 量化算法：RGB555 直方图 + median-cut 到 256 色（零依赖，替代 PIL MEDIANCUT）
 // ---------------------------------------------------------------------------
 
-function packLvgl8(rgbPixels, width, height) {
-  const { palette, indices } = quantizeMedianCut(rgbPixels, width * height)
+function packLvgl8(rgbaPixels, width, height) {
+  const { palette, indices } = quantizeMedianCut(rgbaPixels, width * height)
 
   const out = Buffer.alloc(4 + 256 * 4 + width * height)
   out.writeUInt32LE((10 | (width << 10) | (height << 21)) >>> 0, 0)
@@ -99,11 +126,13 @@ function packLvgl8(rgbPixels, width, height) {
   return out
 }
 
-function quantizeMedianCut(pixels, pixelCount) {
-  // 1. RGB555 直方图
+function quantizeMedianCut(rgbaPixels, pixelCount) {
+  // 1. RGB555 直方图（alpha 已铺白底，直接丢弃）
   const hist = new Uint32Array(32768)
-  for (let i = 0; i < pixels.length; i += 3) {
-    hist[((pixels[i] >> 3) << 10) | ((pixels[i + 1] >> 3) << 5) | (pixels[i + 2] >> 3)]++
+  for (let i = 0; i < rgbaPixels.length; i += 4) {
+    hist[
+      ((rgbaPixels[i] >> 3) << 10) | ((rgbaPixels[i + 1] >> 3) << 5) | (rgbaPixels[i + 2] >> 3)
+    ]++
   }
   const allBins = []
   for (let b = 0; b < 32768; b++) {
@@ -201,9 +230,11 @@ function quantizeMedianCut(pixels, pixelCount) {
 
   // 5. 逐像素查表输出索引
   const indices = new Uint8Array(pixelCount)
-  for (let p = 0, i = 0; p < pixelCount; p++, i += 3) {
+  for (let p = 0, i = 0; p < pixelCount; p++, i += 4) {
     indices[p] =
-      binToIndex[((pixels[i] >> 3) << 10) | ((pixels[i + 1] >> 3) << 5) | (pixels[i + 2] >> 3)]
+      binToIndex[
+        ((rgbaPixels[i] >> 3) << 10) | ((rgbaPixels[i + 1] >> 3) << 5) | (rgbaPixels[i + 2] >> 3)
+      ]
   }
 
   return { palette, indices }
