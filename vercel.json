@@ -1,1 +1,15 @@
-{"functions":{"index.py":{"maxDuration":60}}}
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.py"
+    }
+  ],
+  "functions": {
+    "index.py": {
+      "maxDuration": 60,
+      "excludeFiles": "{tests/**,error.log,todo.md,.git/**,logs/**,data/**,*.sqlite3}"
+    }
+  }
+}

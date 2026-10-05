@@ -186,7 +186,11 @@ def serve(value,loader,default=600,ttl=86400):
             if slot: cache.release(slot,owner)
             cold.release()
     packed,hit=cache.load(key,generate,ttl); n=struct.unpack("<I",packed[:4])[0]; info=json.loads(packed[4:4+n]); body=packed[4+n:]
-    return Response(body,content_type=info["type"],headers={"Content-Length":str(len(body)),"X-Cache":"HIT" if hit else "MISS","X-Image-Original-Size":info["original"],"X-Image-Actual-Size":info["actual"]})
+    etag=f'"{hashlib.sha256(body).hexdigest()[:32]}"'; if_none_match=request.headers.get("If-None-Match")
+    if if_none_match and etag in [tag.strip() for tag in if_none_match.split(",")]:
+        res=Response(status=304); res.headers["ETag"]=etag; res.headers["Cache-Control"]="public, max-age=86400"; res.headers["CDN-Cache-Control"]="public, max-age=86400"; return res
+    headers={"Content-Length":str(len(body)),"ETag":etag,"X-Cache":"HIT" if hit else "MISS","X-Image-Original-Size":info["original"],"X-Image-Actual-Size":info["actual"]}
+    return Response(body,content_type=info["type"],headers=headers)
 def memoize(ttl=300,key=None):
     def decorate(function):
         @wraps(function)

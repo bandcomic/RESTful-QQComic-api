@@ -594,15 +594,17 @@ def get_config():
             "detailPath": "/comic/<id>",
             "photoPath": "/photo/<id>/chapter/<chapter>",
             "searchPath": "/search/<text>/<page>",
-            "type": "qqcomic"
+            "type": "qqcomic",
+            "idType": "numeric"
         }
     }
     return jsonify(config)
 
 
 @app.route("/")
+@app.route("/health")
 def index():
-    return "it works!"
+    return jsonify(status="ok", source="QQComic")
 
 
 @app.route("/comic/<comic_id>")
