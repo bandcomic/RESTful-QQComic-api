@@ -1,5 +1,1 @@
-{
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index" }
-  ]
-}
+{"functions":{"index.py":{"maxDuration":60}}}

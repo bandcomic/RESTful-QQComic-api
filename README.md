@@ -290,3 +290,6 @@ vercel-flask-QQComic-api/
 ---
 
 如果这个项目对你有帮助，请给个 ⭐ Star 支持一下！
+# 三平台部署更新
+
+统一核心、章节缓存、MiniRacer 与图片预算见 [部署说明](docs/DEPLOYMENT.md)。
