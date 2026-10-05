@@ -1,14 +1,12 @@
-.vercel
+node_modules/
 *.log
 *.pyc
-__pycache__
+__pycache__/
 
-# Environments 
-.env 
-.venv 
-env/ 
-venv/ 
-ENV/ 
-env.bak/ 
-venv.bak/ 
-.vercel
+# Environments
+.env
+.venv
+venv/
+
+# OS
+.DS_Store

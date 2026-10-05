@@ -13,8 +13,18 @@ import logging
 from typing import Dict, List, Optional
 import sys
 import time
-from urllib.parse import unquote, quote, urlencode
+from urllib.parse import unquote, quote, urlencode, urlsplit
 from asgiref.wsgi import WsgiToAsgi
+
+ALLOWED_IMAGE_HOSTS = ("ac.qq.com", "acimg.cn", "qpic.cn", "gtimg.cn", "upstream.test")
+
+
+def is_allowed_image_url(url: str) -> bool:
+    try:
+        u = urlsplit(url)
+        return any(u.netloc == h or u.netloc.endswith("." + h) for h in ALLOWED_IMAGE_HOSTS)
+    except Exception:
+        return False
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -629,13 +639,71 @@ def get_comic_info(comic_id: str):
             "page_count": 0,
             "views": info.get("popularity", "0"),
             "rate": rate,
-            "cover": get_proxy_image_url(cover_url, "cover") if cover_url else "",
+            "cover": f"{public_url()}/comic/{comic_id}/cover" if cover_url else "",
             "tags": info.get("tags", []),
             "total_chapters": info.get("total_chapters", 0)
         }
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.get("/comic/<comic_id>/cover")
+def comic_cover(comic_id: str):
+    """漫画封面图片，支持 width/quality/ifPNG 参数"""
+    cookie = request.headers.get("Cookie") or None
+    info = ComicParser.get_comic_info(comic_id)
+    if "error" in info or not info.get("cover_url"):
+        raise ApiError(404, "封面未找到")
+    cover_url = info["cover_url"]
+    def load():
+        if not is_allowed_image_url(cover_url):
+            raise ApiError(502, "上游图片地址非法")
+        resp = requests.get(cover_url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://ac.qq.com/"}, timeout=15)
+        if resp.status_code != 200:
+            raise ApiError(502, "封面下载失败")
+        return resp.content
+    return serve(["cover", comic_id], load, 200)
+
+
+@app.get("/photo/<comic_id>/chapter/<int:chapter_number>/<path:page>")
+def chapter_page_image(comic_id: str, chapter_number: int, page: str):
+    """章节单页图片，格式 /photo/<id>/chapter/<chapter>/<page>.jpg"""
+    cookie = request.headers.get("Cookie") or None
+    match = re.match(r"^(\d+)", page or "")
+    if not match:
+        raise ApiError(400, "无效的页码")
+    page_num = int(match.group(1))
+
+    comic_info = ComicParser.get_comic_info(comic_id)
+    if "error" in comic_info:
+        raise ApiError(500, comic_info.get("error", "获取漫画失败"))
+
+    target_chapter = None
+    for chapter in comic_info.get("chapters", []):
+        if chapter.get("number") == chapter_number:
+            target_chapter = chapter
+            break
+    if not target_chapter:
+        raise ApiError(404, f"未找到第 {chapter_number} 章")
+
+    images_data = ComicParser.get_chapter_images(target_chapter["link"], cookie)
+    if not images_data.get("success"):
+        raise ApiError(500, images_data.get("error", "获取图片失败"))
+
+    pictures = [p["url"] for p in images_data.get("data", {}).get("picture", []) if p.get("url")]
+    if page_num < 1 or page_num > len(pictures):
+        raise ApiError(404, "页面不存在")
+
+    target_url = pictures[page_num - 1]
+    def load():
+        if not is_allowed_image_url(target_url):
+            raise ApiError(502, "上游图片地址非法")
+        resp = requests.get(target_url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://ac.qq.com/"}, timeout=20)
+        if resp.status_code != 200:
+            raise ApiError(502, "图片下载失败")
+        return resp.content
+    return serve(["page", comic_id, chapter_number, page_num], load, 600)
 
 
 @app.route("/photo/<comic_id>/chapter/<int:chapter_number>", methods=["GET", "POST"])
@@ -671,10 +739,13 @@ def get_specific_chapter(comic_id: str, chapter_number: int):
 
         chapter_data = images_data.get("data", {})
         pictures = chapter_data.get("picture", [])
+        page_count = len([p for p in pictures if p.get("url")])
+        api_url = public_url()
 
-        images = []
-        for pic in pictures:
-            images.append({"url": get_proxy_image_url(pic.get("url", ""))})
+        images = [
+            {"url": f"{api_url}/photo/{comic_id}/chapter/{chapter_number}/{page}.jpg"}
+            for page in range(1, page_count + 1)
+        ]
 
         result = {
             "title": target_chapter.get("title", ""),
@@ -703,12 +774,14 @@ def search_comics(value: str = "", client_page: Optional[int] = 1):
             return jsonify(search_result), 500
 
         results = []
+        api_url = public_url()
         for comic in search_result.get("results", []):
             cover_url = comic.get("cover_url", "")
+            cid = comic.get("comic_id", 0)
             results.append({
-                "comic_id": int(comic.get("comic_id", 0)),
+                "comic_id": int(cid),
                 "title": comic.get("title", ""),
-                "cover_url": get_proxy_image_url(cover_url, "cover") if cover_url else "",
+                "cover_url": f"{api_url}/comic/{cid}/cover" if cover_url else "",
                 "pages": 0
             })
 
@@ -722,57 +795,26 @@ def search_comics(value: str = "", client_page: Optional[int] = 1):
         return jsonify({"error": f"搜索失败: {str(e)}"}), 500
 
 
-# 在Flask路由部分添加图片代理接口
 @app.route("/image/proxy")
 def image_proxy():
-    """图片代理接口，处理图片尺寸、质量和格式"""
-    try:
-        image_url = request.args.get("url")
-        if not image_url:
-            return jsonify({"error": "缺少url参数"}), 400
-
-        target_width = int(request.args.get("width") or request.args.get("w") or 600)
-        quality = int(request.args.get("quality") or request.args.get("q") or 50)
-        quality = max(1, min(100, quality))
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Referer": "https://ac.qq.com/",
-        }
-
-        resp = requests.get(image_url, headers=headers, timeout=30)
-        if resp.status_code != 200:
-            return jsonify({"error": f"图片下载失败: {resp.status_code}"}), 500
-
-        image = Image.open(BytesIO(resp.content))
-        if image.width > target_width:
-            target_height = int(image.height * (target_width / image.width))
-            image = image.resize((target_width, target_height), Image.Resampling.LANCZOS)
-
-        return build_image_response(image, "qqcomic_image", quality)
-
-    except Exception as e:
-        logging.error(f"图片处理失败: {str(e)}")
-        return jsonify({"error": f"图片处理失败: {str(e)}"}), 500
+    """图片代理接口兼容（优先走缓存和 serve 管线）"""
+    url = request.args.get("url", "")
+    if not url:
+        raise ApiError(400, "缺少 url 参数")
+    if not is_allowed_image_url(url):
+        raise ApiError(403, "不允许的图片地址")
+    def load():
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://ac.qq.com/"}, timeout=20)
+        if response.status_code != 200:
+            raise ApiError(502, "图片上游失败")
+        return response.content
+    return serve(["proxy", url], load)
 
 
 ComicParser.get_comic_info = staticmethod(memoize(600)(ComicParser.get_comic_info))
 ComicParser.get_chapter_images = staticmethod(memoize(300)(ComicParser.get_chapter_images))
 comic_searcher.search_comics_direct = memoize(60)(comic_searcher.search_comics_direct)
 decode_search_value = lambda value: value
-
-
-def cached_image_proxy():
-    url = request.args.get("url","")
-    if not url: raise ApiError(400,"缺少 url")
-    def load():
-        response = requests.get(url,headers={"User-Agent":"Mozilla/5.0","Referer":"https://ac.qq.com/"})
-        if response.status_code != 200: raise ApiError(502,"图片上游失败")
-        return response.content
-    return serve(["proxy",url],load)
-
-
-app.view_functions["image_proxy"] = cached_image_proxy
 
 
 if __name__ == "__main__":
